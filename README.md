@@ -59,8 +59,8 @@ Sistema Responde:
 
 ### Opción 1: Script Automático (Recomendado)
 ```powershell
-git clone https://github.com/TU_USUARIO/pdf-query-system.git
-cd pdf-query-system
+git clone https://github.com/juansolor/pdfanalizer.git
+cd pdfanalizer
 .\START.ps1
 ```
 
@@ -206,8 +206,9 @@ MIT License - Ver [LICENSE](LICENSE) para más detalles
 
 ## 👥 Autor
 
-**Tu Nombre**
-- GitHub: [@TU_USUARIO](https://github.com/TU_USUARIO)
+**Juan Solor**
+- GitHub: [@juansolor](https://github.com/juansolor)
+- Repositorio: [pdfanalizer](https://github.com/juansolor/pdfanalizer)
 
 ## 🙏 Agradecimientos
 
@@ -222,7 +223,7 @@ MIT License - Ver [LICENSE](LICENSE) para más detalles
 
 **⭐ Si este proyecto te fue útil, considera darle una estrella ⭐**
 
-[Reportar Bug](https://github.com/TU_USUARIO/pdf-query-system/issues) · [Solicitar Feature](https://github.com/TU_USUARIO/pdf-query-system/issues) · [Documentación](INDICE.md)
+[Reportar Bug](https://github.com/juansolor/pdfanalizer/issues) · [Solicitar Feature](https://github.com/juansolor/pdfanalizer/issues) · [Documentación](INDICE.md)
 
 **Hecho con ❤️ y Python**
 
