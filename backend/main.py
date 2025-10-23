@@ -35,13 +35,15 @@ app = FastAPI(
 )
 
 # Configurar CORS
+# En desarrollo, permite orígenes específicos o usa allow_origin_regex para red local
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=CORS_ORIGINS if not DEBUG else ["*"],  # En DEBUG permite todos los orígenes
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["*"]
+    expose_headers=["*"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+):\d+" if DEBUG else None
 )
 
 # Directorios

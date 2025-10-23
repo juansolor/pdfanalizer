@@ -2,7 +2,21 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import './App.css'
 
-const API_BASE_URL = 'http://localhost:8000'
+// Configuración dinámica de API
+// Detecta automáticamente si estás accediendo desde otra máquina en la red
+const getApiBaseUrl = () => {
+  const hostname = window.location.hostname
+  
+  // Si accedes desde localhost, usa localhost
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'http://localhost:8000'
+  }
+  
+  // Si accedes desde una IP de red local, usa esa IP para el backend
+  return `http://${hostname}:8000`
+}
+
+const API_BASE_URL = getApiBaseUrl()
 
 function App() {
   const [selectedFile, setSelectedFile] = useState(null)
