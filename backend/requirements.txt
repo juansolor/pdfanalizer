@@ -5,6 +5,10 @@ python-multipart==0.0.6
 PyPDF2==3.0.1
 python-dotenv==1.0.0
 
+# Base de datos
+sqlalchemy==2.0.23
+alembic==1.13.1
+
 # Dependencias opcionales para funciones avanzadas
 # Descomenta las que necesites:
 # python-jose[cryptography]==3.3.0

@@ -1,15 +1,30 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 import os
 import shutil
 import logging
 import re
 from pathlib import Path
 import PyPDF2
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from collections import Counter
 from dotenv import load_dotenv
+import time
+
+# Importar base de datos
+from database import get_db, init_db
+import db_services as db_svc
+
+# Importar cache, FTS y analytics
+import cache_manager as cache
+import fts_search as fts
+import analytics as analytics_module
+
+# Importar traductor
+import translator
 
 # Cargar variables de entorno
 load_dotenv()
@@ -53,6 +68,17 @@ RESULTS_DIR = Path(RESULTS_FOLDER)
 # Crear directorios si no existen
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# ========== Modelos Pydantic ==========
+
+class QueryRequest(BaseModel):
+    question: str
+    filename: str
+
+class MultiQueryRequest(BaseModel):
+    question: str
+    filenames: List[str]
+    search_all: Optional[bool] = False
 
 # ========== Funciones de análisis de texto ==========
 
@@ -280,6 +306,127 @@ def generate_answer_with_pages(question: str, file_path: Path, filename: str) ->
         "pages_found": list(pages_found.keys())
     }
 
+def search_multiple_pdfs(question: str, filenames: List[str]) -> Dict:
+    """Buscar en múltiples PDFs y agregar resultados"""
+    all_results = []
+    total_matches = 0
+    documents_found = 0
+    
+    # Analizar la pregunta una sola vez
+    analysis = analyze_question(question)
+    keywords = analysis["keywords"]
+    
+    if not keywords:
+        return {
+            "answer": "No pude identificar palabras clave en tu pregunta. Por favor, intenta ser más específico.",
+            "keywords": [],
+            "results": [],
+            "total_matches": 0,
+            "documents_found": 0,
+            "comparison": {}
+        }
+    
+    # Buscar en cada PDF
+    for filename in filenames:
+        file_path = UPLOAD_DIR / filename
+        
+        if not file_path.exists():
+            continue
+            
+        try:
+            # Extraer texto por páginas
+            pages_text = extract_pdf_text_by_pages(file_path)
+            
+            # Buscar en páginas
+            search_results = search_in_pages(pages_text, keywords)
+            
+            if search_results:
+                documents_found += 1
+                doc_matches = len(search_results)
+                total_matches += doc_matches
+                
+                # Agrupar por página
+                pages_found = {}
+                for result in search_results:
+                    page = result["page"]
+                    if page not in pages_found:
+                        pages_found[page] = []
+                    pages_found[page].append(result)
+                
+                # Construir ubicaciones
+                locations = []
+                for page, results in sorted(pages_found.items())[:3]:  # Máximo 3 páginas por documento
+                    locations.append({
+                        "page": page,
+                        "keywords": [r["keyword"] for r in results],
+                        "preview": results[0]["context"][:150] + "..."
+                    })
+                
+                all_results.append({
+                    "filename": filename,
+                    "matches": doc_matches,
+                    "pages_found": list(pages_found.keys()),
+                    "locations": locations,
+                    "total_pages": len(pages_text)
+                })
+        
+        except Exception as e:
+            # Si hay error con un PDF, continuar con los demás
+            continue
+    
+    # Si no se encontró nada
+    if not all_results:
+        return {
+            "answer": f"No encontré información relacionada con '{', '.join(keywords)}' en los {len(filenames)} documento(s) seleccionados.",
+            "keywords": keywords,
+            "results": [],
+            "total_matches": 0,
+            "documents_found": 0,
+            "comparison": {}
+        }
+    
+    # Construir respuesta comparativa
+    answer_parts = [f"🔍 **Búsqueda en {len(filenames)} documento(s)**\n"]
+    answer_parts.append(f"📊 **Resultados:** Encontré información en **{documents_found}** de {len(filenames)} documentos.\n")
+    
+    # Ordenar documentos por número de coincidencias
+    all_results.sort(key=lambda x: x["matches"], reverse=True)
+    
+    # Mostrar resultados por documento
+    for idx, doc_result in enumerate(all_results[:5], 1):  # Máximo 5 documentos
+        answer_parts.append(f"\n📄 **{idx}. {doc_result['filename']}**")
+        answer_parts.append(f"   • {doc_result['matches']} coincidencia(s) en {len(doc_result['pages_found'])} página(s)")
+        answer_parts.append(f"   • Páginas: {', '.join(map(str, doc_result['pages_found'][:5]))}")
+        
+        # Mostrar preview de la primera ubicación
+        if doc_result['locations']:
+            first_location = doc_result['locations'][0]
+            preview = first_location['preview'][:120] + "..."
+            answer_parts.append(f"   • Vista previa (pág. {first_location['page']}): \"{preview}\"")
+    
+    # Resumen comparativo
+    answer_parts.append(f"\n\n💡 **Conclusión:**")
+    answer_parts.append(f"• Total de {total_matches} coincidencia(s) encontradas")
+    answer_parts.append(f"• {documents_found} documento(s) contienen información relevante")
+    answer_parts.append(f"• Palabras clave buscadas: {', '.join(keywords)}")
+    
+    # Comparación de documentos
+    comparison = {
+        "most_relevant": all_results[0]["filename"] if all_results else None,
+        "documents_with_results": documents_found,
+        "documents_without_results": len(filenames) - documents_found,
+        "average_matches_per_doc": round(total_matches / documents_found, 2) if documents_found > 0 else 0
+    }
+    
+    return {
+        "answer": "\n".join(answer_parts),
+        "keywords": keywords,
+        "results": all_results,
+        "total_matches": total_matches,
+        "documents_found": documents_found,
+        "comparison": comparison
+    }
+
 def generate_summary(text: str, max_sentences: int = 5) -> str:
     """Generar un resumen del texto"""
     # Dividir en oraciones
@@ -395,7 +542,7 @@ async def health_check():
     }
 
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Subir un archivo PDF"""
     # Validar que se proporcionó un archivo
     if not file.filename:
@@ -407,7 +554,8 @@ async def upload_pdf(file: UploadFile = File(...)):
     
     # Validar tamaño del archivo
     contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
+    file_size = len(contents)
+    if file_size > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=413, 
             detail=f"El archivo es demasiado grande. Tamaño máximo: {MAX_FILE_SIZE // (1024*1024)}MB"
@@ -418,7 +566,39 @@ async def upload_pdf(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         buffer.write(contents)
     
-    return {"message": f"Archivo {file.filename} subido correctamente", "file_path": str(file_path)}
+    try:
+        # Extraer texto y metadata del PDF
+        pages_text = extract_pdf_text_by_pages(file_path)
+        full_text = "\n".join(pages_text.values())
+        total_pages = len(pages_text)
+        
+        # Guardar en base de datos
+        pdf_doc = db_svc.create_pdf_document(
+            db=db,
+            filename=file.filename,
+            file_path=str(file_path),
+            file_size=file_size,
+            total_pages=total_pages,
+            full_text=full_text,
+            text_by_pages=pages_text
+        )
+        
+        # Incrementar estadísticas
+        db_svc.increment_upload_count(db)
+        
+        return {
+            "message": f"Archivo {file.filename} subido correctamente",
+            "file_path": str(file_path),
+            "pdf_id": pdf_doc.id,
+            "total_pages": total_pages,
+            "word_count": pdf_doc.word_count
+        }
+    
+    except Exception as e:
+        # Si falla, eliminar archivo y registro de BD
+        if file_path.exists():
+            file_path.unlink()
+        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
 
 @app.post("/extract-text/{filename}")
 async def extract_text(filename: str):
@@ -446,7 +626,7 @@ async def extract_text(filename: str):
         raise HTTPException(status_code=500, detail=f"Error al procesar PDF: {str(e)}")
 
 @app.post("/query")
-async def query_pdf(query: dict):
+async def query_pdf(query: dict, db: Session = Depends(get_db)):
     """Realizar consulta sobre el contenido del PDF"""
     question = query.get("question", "")
     filename = query.get("filename", "")
@@ -460,23 +640,178 @@ async def query_pdf(query: dict):
         raise HTTPException(status_code=404, detail=f"Archivo {filename} no encontrado")
     
     try:
+        # 🚀 INTENTAR RECUPERAR DEL CACHE
+        cached_result = cache.get_cached_result(db, question, [filename], "single")
+        if cached_result:
+            print(f"✅ Cache HIT para query: {question[:50]}...")
+            # Actualizar estadísticas (no contar tiempo de ejecución)
+            db_svc.increment_query_count(db, 0.001, cached_result.get("total_matches", 0), "single")
+            return {
+                **cached_result,
+                "cached": True,
+                "cache_hit": True
+            }
+        
+        print(f"❌ Cache MISS para query: {question[:50]}...")
+        start_time = time.time()
+        
         # Generar respuesta con ubicaciones de página
         result = generate_answer_with_pages(question, file_path, filename)
+        
+        execution_time = time.time() - start_time
         
         # Agregar información adicional
         result["question"] = question
         result["filename"] = filename
+        result["cached"] = False
+        
+        # 💾 GUARDAR EN CACHE (TTL 24 horas por defecto)
+        cache.cache_query_result(
+            db=db,
+            question=question,
+            pdf_files=[filename],
+            search_type="single",
+            result=result,
+            execution_time=execution_time,
+            ttl_hours=24
+        )
+        
+        # Guardar en historial
+        db_svc.create_query_history(
+            db=db,
+            question=question,
+            pdf_filename=filename,
+            search_type="single",
+            keywords_found=result.get("keywords", []),
+            total_matches=result.get("total_matches", 0),
+            documents_found=1,
+            execution_time=execution_time,
+            answer=result.get("answer", ""),
+            results=result
+        )
+        
+        # Actualizar acceso del PDF
+        db_svc.update_pdf_access(db, filename)
+        
+        # Actualizar estadísticas
+        db_svc.increment_query_count(db, execution_time, result.get("total_matches", 0), "single")
+        if result.get("keywords"):
+            db_svc.update_top_keywords(db, result["keywords"])
         
         return result
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error procesando consulta: {str(e)}")
 
+@app.post("/query-multiple")
+async def query_multiple_pdfs_endpoint(request: MultiQueryRequest, db: Session = Depends(get_db)):
+    """Realizar consulta en múltiples PDFs"""
+    question = request.question
+    filenames = request.filenames
+    search_all = request.search_all
+    
+    if not question:
+        raise HTTPException(status_code=400, detail="Se requiere una pregunta")
+    
+    # Si search_all es True, buscar en todos los PDFs disponibles
+    if search_all:
+        filenames = [f.name for f in UPLOAD_DIR.glob("*.pdf")]
+        
+        if not filenames:
+            raise HTTPException(status_code=404, detail="No se encontraron archivos PDF")
+    
+    if not filenames:
+        raise HTTPException(status_code=400, detail="Se requiere al menos un archivo")
+    
+    try:
+        search_type = "all" if search_all else "multiple"
+        
+        # 🚀 INTENTAR RECUPERAR DEL CACHE
+        cached_result = cache.get_cached_result(db, question, filenames, search_type)
+        if cached_result:
+            print(f"✅ Cache HIT para query múltiple: {question[:50]}...")
+            # Actualizar estadísticas (no contar tiempo de ejecución)
+            db_svc.increment_query_count(db, 0.001, cached_result.get("total_matches", 0), search_type)
+            return {
+                **cached_result,
+                "cached": True,
+                "cache_hit": True
+            }
+        
+        print(f"❌ Cache MISS para query múltiple: {question[:50]}...")
+        start_time = time.time()
+        
+        # Realizar búsqueda en múltiples PDFs
+        result = search_multiple_pdfs(question, filenames)
+        
+        execution_time = time.time() - start_time
+        
+        # Agregar información adicional
+        result["question"] = question
+        result["searched_files"] = filenames
+        result["search_all"] = search_all
+        result["cached"] = False
+        
+        # 💾 GUARDAR EN CACHE (TTL 12 horas para multi-búsquedas)
+        cache.cache_query_result(
+            db=db,
+            question=question,
+            pdf_files=filenames,
+            search_type=search_type,
+            result=result,
+            execution_time=execution_time,
+            ttl_hours=12  # Menor TTL para búsquedas múltiples
+        )
+        
+        # Guardar en historial
+        db_svc.create_query_history(
+            db=db,
+            question=question,
+            multiple_pdfs=filenames,
+            search_type=search_type,
+            keywords_found=result.get("keywords", []),
+            total_matches=result.get("total_matches", 0),
+            documents_found=result.get("documents_found", 0),
+            execution_time=execution_time,
+            answer=result.get("answer", ""),
+            results=result
+        )
+        
+        # Actualizar acceso de cada PDF encontrado
+        if result.get("results"):
+            for doc_result in result["results"]:
+                db_svc.update_pdf_access(db, doc_result["filename"])
+        
+        # Actualizar estadísticas
+        db_svc.increment_query_count(db, execution_time, result.get("total_matches", 0), search_type)
+        if result.get("keywords"):
+            db_svc.update_top_keywords(db, result["keywords"])
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error procesando consulta múltiple: {str(e)}")
+
 @app.get("/list-pdfs")
-async def list_pdfs():
-    """Listar todos los PDFs subidos"""
-    pdf_files = [f.name for f in UPLOAD_DIR.glob("*.pdf")]
-    return {"pdfs": pdf_files}
+async def list_pdfs(db: Session = Depends(get_db)):
+    """Listar todos los PDFs subidos con metadata"""
+    pdfs_db = db_svc.get_all_pdfs(db)
+    
+    return {
+        "pdfs": [pdf.filename for pdf in pdfs_db],
+        "detailed": [
+            {
+                "filename": pdf.filename,
+                "upload_date": pdf.upload_date.isoformat() if pdf.upload_date else None,
+                "file_size": pdf.file_size,
+                "total_pages": pdf.total_pages,
+                "access_count": pdf.access_count,
+                "tags": pdf.tags or [],
+                "category": pdf.category
+            }
+            for pdf in pdfs_db
+        ]
+    }
 
 @app.get("/view-pdf/{filename}")
 async def view_pdf(filename: str, page: int = 1):
@@ -516,7 +851,7 @@ async def analyze_pdf(filename: str, analysis_type: str = "summary"):
                 "analysis_type": analysis_type
             }
         
-        result = {
+        result: Dict[str, Any] = {
             "filename": filename,
             "analysis_type": analysis_type
         }
@@ -584,6 +919,482 @@ async def batch_analyze_pdf(filename: str):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en análisis batch: {str(e)}")
+
+# ========== ENDPOINTS DE BASE DE DATOS ==========
+
+@app.get("/api/history")
+async def get_query_history(limit: int = 20, db: Session = Depends(get_db)):
+    """Obtener historial de consultas recientes"""
+    queries = db_svc.get_recent_queries(db, limit=limit)
+    
+    return {
+        "total": len(queries),
+        "queries": [
+            {
+                "id": q.id,
+                "question": q.question,
+                "pdf_filename": q.pdf_filename,
+                "search_type": q.search_type,
+                "total_matches": q.total_matches,
+                "documents_found": q.documents_found,
+                "execution_time": q.execution_time,
+                "query_date": q.query_date.isoformat() if q.query_date else None
+            }
+            for q in queries
+        ]
+    }
+
+@app.get("/api/statistics")
+async def get_statistics(days: int = 7, db: Session = Depends(get_db)):
+    """Obtener estadísticas de uso"""
+    stats = db_svc.get_statistics_summary(db, days=days)
+    return stats
+
+@app.get("/api/dashboard")
+async def get_dashboard(db: Session = Depends(get_db)):
+    """Obtener datos para dashboard"""
+    dashboard_data = db_svc.get_dashboard_data(db)
+    return dashboard_data
+
+@app.get("/api/pdf/{filename}/stats")
+async def get_pdf_stats(filename: str, db: Session = Depends(get_db)):
+    """Obtener estadísticas de un PDF específico"""
+    stats = db_svc.get_pdf_statistics(db, filename)
+    
+    if not stats:
+        raise HTTPException(status_code=404, detail=f"PDF {filename} no encontrado en base de datos")
+    
+    return stats
+
+@app.post("/api/pdf/{filename}/tags")
+async def add_pdf_tags(filename: str, tags: List[str], db: Session = Depends(get_db)):
+    """Agregar tags a un PDF"""
+    db_svc.add_pdf_tags(db, filename, tags)
+    return {"message": f"Tags agregados a {filename}", "tags": tags}
+
+@app.post("/api/pdf/{filename}/category")
+async def set_pdf_category(filename: str, category: str, db: Session = Depends(get_db)):
+    """Establecer categoría de un PDF"""
+    db_svc.set_pdf_category(db, filename, category)
+    return {"message": f"Categoría '{category}' establecida para {filename}"}
+
+@app.delete("/api/pdf/{filename}")
+async def delete_pdf(filename: str, db: Session = Depends(get_db)):
+    """Eliminar un PDF"""
+    # Eliminar archivo físico
+    file_path = UPLOAD_DIR / filename
+    if file_path.exists():
+        file_path.unlink()
+    
+    # Invalidar cache del PDF antes de eliminarlo
+    invalidated_count = cache.invalidate_cache_for_pdf(db, filename)
+    print(f"🗑️ Cache invalidado para {filename}: {invalidated_count} entradas")
+    
+    # Eliminar del índice FTS
+    try:
+        pdf = db_svc.get_pdf_by_filename(db, filename)
+        if pdf:
+            fts.remove_pdf_from_fts(db, pdf.id)
+            print(f"🗑️ Eliminado del índice FTS: {filename}")
+    except Exception as e:
+        print(f"⚠️ Error eliminando de FTS: {e}")
+    
+    # Eliminar de base de datos
+    deleted = db_svc.delete_pdf_document(db, filename)
+    
+    if deleted:
+        return {
+            "message": f"PDF {filename} eliminado correctamente",
+            "cache_invalidated": invalidated_count,
+            "fts_removed": True
+        }
+    else:
+        raise HTTPException(status_code=404, detail=f"PDF {filename} no encontrado")
+
+@app.get("/api/popular-queries")
+async def get_popular_queries(limit: int = 10, db: Session = Depends(get_db)):
+    """Obtener consultas más populares"""
+    popular = db_svc.get_popular_queries(db, limit=limit)
+    return {"popular_queries": popular}
+
+
+# ============================================================
+# ENDPOINTS DE CACHE
+# ============================================================
+
+@app.get("/api/cache/stats")
+async def get_cache_stats(db: Session = Depends(get_db)):
+    """Obtener estadísticas del cache"""
+    try:
+        stats = cache.get_cache_statistics(db)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas de cache: {str(e)}")
+
+
+@app.post("/api/cache/clear")
+async def clear_cache(expired_only: bool = True, db: Session = Depends(get_db)):
+    """Limpiar cache (solo expirados o todo)"""
+    try:
+        if expired_only:
+            removed = cache.clear_expired_cache(db)
+            return {"message": f"Cache expirado limpiado", "removed_entries": removed}
+        else:
+            # Limpiar todo (marcar como inválido)
+            from cache_manager import QueryCache
+            all_cache = db.query(QueryCache).all()
+            for entry in all_cache:
+                entry.is_valid = False
+            db.commit()
+            return {"message": "Todo el cache ha sido invalidado", "removed_entries": len(all_cache)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error limpiando cache: {str(e)}")
+
+
+@app.post("/api/cache/cleanup")
+async def smart_cache_cleanup(max_entries: int = 1000, min_hits: int = 2, db: Session = Depends(get_db)):
+    """Limpieza inteligente del cache"""
+    try:
+        result = cache.smart_cache_cleanup(db, max_entries=max_entries, min_hits=min_hits)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en limpieza inteligente: {str(e)}")
+
+
+# ============================================================
+# ENDPOINTS DE FULL-TEXT SEARCH (FTS)
+# ============================================================
+
+@app.post("/api/fts/init")
+async def initialize_fts(db: Session = Depends(get_db)):
+    """Inicializar tablas FTS5"""
+    try:
+        fts.init_fts_tables(db)
+        return {"message": "Tablas FTS5 inicializadas correctamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error inicializando FTS: {str(e)}")
+
+
+@app.post("/api/fts/index/{filename}")
+async def index_pdf_fts(filename: str, db: Session = Depends(get_db)):
+    """Indexar un PDF específico en FTS"""
+    try:
+        # Obtener PDF de base de datos
+        pdf = db_svc.get_pdf_by_filename(db, filename)
+        if not pdf:
+            raise HTTPException(status_code=404, detail=f"PDF {filename} no encontrado")
+        
+        if not pdf.text_by_pages:
+            raise HTTPException(status_code=400, detail=f"PDF {filename} no tiene texto extraído")
+        
+        # Indexar
+        fts.index_pdf_for_fts(db, pdf.id, pdf.filename, pdf.text_by_pages)
+        return {"message": f"PDF {filename} indexado en FTS", "pages_indexed": len(pdf.text_by_pages)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error indexando PDF: {str(e)}")
+
+
+@app.post("/api/fts/rebuild")
+async def rebuild_fts(db: Session = Depends(get_db)):
+    """Reconstruir índice FTS completo"""
+    try:
+        result = fts.rebuild_fts_index(db)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reconstruyendo FTS: {str(e)}")
+
+
+@app.get("/api/fts/search")
+async def search_fts(query: str, filenames: Optional[str] = None, limit: int = 50, db: Session = Depends(get_db)):
+    """Búsqueda full-text ultrarrápida"""
+    try:
+        filename_list = filenames.split(",") if filenames else None
+        results = fts.fts_search(db, query, filename_list, limit)
+        return {
+            "query": query,
+            "total_results": len(results),
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en búsqueda FTS: {str(e)}")
+
+
+@app.get("/api/fts/stats")
+async def get_fts_stats(db: Session = Depends(get_db)):
+    """Estadísticas del índice FTS"""
+    try:
+        stats = fts.get_fts_statistics(db)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas FTS: {str(e)}")
+
+
+# ============================================================
+# ENDPOINTS DE ANALYTICS
+# ============================================================
+
+@app.get("/api/analytics/trending")
+async def get_trending(days: int = 7, limit: int = 20, db: Session = Depends(get_db)):
+    """Keywords en tendencia"""
+    try:
+        trending = analytics_module.get_trending_keywords(db, days=days, limit=limit)
+        return {
+            "period_days": days,
+            "trending_keywords": trending
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo tendencias: {str(e)}")
+
+
+@app.get("/api/analytics/correlations")
+async def get_correlations(days: int = 30, min_support: int = 2, db: Session = Depends(get_db)):
+    """Correlaciones entre queries"""
+    try:
+        correlations = analytics_module.find_query_correlations(db, days=days, min_support=min_support)
+        return {
+            "period_days": days,
+            "correlations": correlations
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo correlaciones: {str(e)}")
+
+
+@app.get("/api/analytics/similar-docs/{filename}")
+async def get_similar_docs(filename: str, limit: int = 5, db: Session = Depends(get_db)):
+    """Documentos similares a un PDF"""
+    try:
+        similar = analytics_module.find_similar_documents(db, filename, limit=limit)
+        return {
+            "target_document": filename,
+            "similar_documents": similar
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error encontrando documentos similares: {str(e)}")
+
+
+@app.get("/api/analytics/usage-patterns")
+async def get_usage_patterns(days: int = 30, db: Session = Depends(get_db)):
+    """Patrones de uso por hora y día"""
+    try:
+        patterns = analytics_module.get_usage_patterns_by_time(db, days=days)
+        return patterns
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo patrones de uso: {str(e)}")
+
+
+@app.get("/api/analytics/pdf-trends")
+async def get_pdf_trends(days: int = 30, db: Session = Depends(get_db)):
+    """Tendencias de uso de PDFs"""
+    try:
+        trends = analytics_module.get_pdf_usage_trends(db, days=days)
+        return {
+            "period_days": days,
+            "pdf_trends": trends
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo tendencias de PDFs: {str(e)}")
+
+
+@app.get("/api/analytics/performance")
+async def get_performance_stats(days: int = 30, db: Session = Depends(get_db)):
+    """Estadísticas de rendimiento"""
+    try:
+        stats = analytics_module.get_query_performance_stats(db, days=days)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas de rendimiento: {str(e)}")
+
+
+@app.get("/api/analytics/user-patterns")
+async def get_user_patterns(days: int = 30, db: Session = Depends(get_db)):
+    """Patrones de comportamiento del usuario"""
+    try:
+        patterns = analytics_module.detect_user_patterns(db, days=days)
+        return patterns
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error detectando patrones de usuario: {str(e)}")
+
+
+@app.get("/api/analytics/dashboard")
+async def get_analytics_dashboard(days: int = 30, db: Session = Depends(get_db)):
+    """Dashboard completo de analytics"""
+    try:
+        dashboard = analytics_module.get_complete_analytics_dashboard(db, days=days)
+        return dashboard
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando dashboard de analytics: {str(e)}")
+
+
+# ============================================================
+# ENDPOINTS DE TRADUCCIÓN (ALEMÁN ↔ INGLÉS)
+# ============================================================
+
+class TranslateRequest(BaseModel):
+    text: str
+    source_lang: str = "de"  # alemán por defecto
+    target_lang: str = "en"  # inglés por defecto
+    preserve_case: bool = True
+
+@app.post("/api/translate")
+async def translate_text_endpoint(request: TranslateRequest):
+    """
+    Traducir texto del alemán al inglés (o viceversa)
+    
+    Ejemplo:
+    ```
+    {
+        "text": "Wie viele Seiten hat das Dokument?",
+        "source_lang": "de",
+        "target_lang": "en"
+    }
+    ```
+    """
+    try:
+        result = translator.translate_query(
+            request.text, 
+            source_lang=request.source_lang,
+            target_lang=request.target_lang
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error traduciendo: {str(e)}")
+
+
+@app.get("/api/translate/word")
+async def translate_word_endpoint(
+    word: str,
+    source_lang: str = "de",
+    target_lang: str = "en"
+):
+    """
+    Traducir una palabra individual
+    
+    Ejemplo: /api/translate/word?word=dokument&source_lang=de&target_lang=en
+    """
+    try:
+        translation = translator.translate_word(word, source_lang, target_lang)
+        
+        if translation:
+            return {
+                "original": word,
+                "translation": translation,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "found": True
+            }
+        else:
+            return {
+                "original": word,
+                "translation": None,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "found": False,
+                "message": "Palabra no encontrada en diccionario"
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error traduciendo palabra: {str(e)}")
+
+
+@app.get("/api/translate/stats")
+async def get_translation_stats():
+    """Estadísticas del diccionario de traducción"""
+    try:
+        stats = translator.get_dictionary_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas: {str(e)}")
+
+
+@app.post("/api/translate/custom")
+async def add_custom_translation(german: str, english: str):
+    """
+    Agregar traducción personalizada al diccionario
+    
+    Ejemplo: /api/translate/custom?german=beispiel&english=example
+    """
+    try:
+        translator.add_custom_translation(german, english)
+        return {
+            "message": f"Traducción agregada: {german} → {english}",
+            "german": german,
+            "english": english
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error agregando traducción: {str(e)}")
+
+
+@app.post("/api/query-translated")
+async def query_pdf_translated(
+    filename: str,
+    question_german: str,
+    translate_result: bool = True,
+    db: Session = Depends(get_db)
+):
+    """
+    Hacer query en alemán, traducir al inglés, buscar y opcionalmente traducir resultado
+    
+    Ejemplo:
+    ```
+    POST /api/query-translated
+    {
+        "filename": "manual.pdf",
+        "question_german": "Wie viele Seiten hat das Dokument?",
+        "translate_result": true
+    }
+    ```
+    """
+    try:
+        # 1. Traducir pregunta de alemán a inglés
+        translation_result = translator.translate_query(question_german, "de", "en")
+        question_english = translation_result["translated"]
+        
+        # 2. Hacer query en inglés
+        file_path = UPLOAD_DIR / filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"Archivo {filename} no encontrado")
+        
+        # Intenta cache primero
+        cached_result = cache.get_cached_result(db, question_english, [filename], "single")
+        if cached_result:
+            query_result = cached_result
+            query_result["cached"] = True
+        else:
+            # Procesa query
+            start_time = time.time()
+            query_result = generate_answer_with_pages(question_english, file_path, filename)
+            execution_time = time.time() - start_time
+            
+            # Guarda en cache
+            cache.cache_query_result(db, question_english, [filename], "single", 
+                                    query_result, execution_time, ttl_hours=24)
+            query_result["cached"] = False
+        
+        # 3. Construir respuesta
+        response = {
+            "original_question": question_german,
+            "translated_question": question_english,
+            "translation_info": translation_result,
+            "query_result": query_result
+        }
+        
+        # 4. Opcionalmente traducir resultado de vuelta a alemán
+        if translate_result and query_result.get("answer"):
+            answer_german = translator.translate_text(
+                query_result["answer"], 
+                source_lang="en", 
+                target_lang="de"
+            )
+            response["answer_german"] = answer_german
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en query traducida: {str(e)}")
+
 
 # Catch-all para peticiones de hot-reload de React (evitar spam de 404)
 @app.get("/{path:path}")
