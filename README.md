@@ -1,4 +1,4 @@
-# � PDF Query System v2.2.1
+# 📚 PDF Query System v2.2.2
 
 [![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
@@ -7,7 +7,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3+-003b57.svg)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Sistema inteligente para consultar PDFs con **ubicación de páginas**, **navegación directa**, **traducción alemán-inglés**, **caché inteligente**, **búsqueda full-text ultrarrápida** y **analytics avanzados**. Sube documentos, haz preguntas en alemán o inglés y obtén respuestas precisas con el número de página exacto donde se encuentra la información.
+Sistema inteligente para consultar PDFs con **ubicación de páginas**, **navegación directa**, **traducción multiidioma integrada**, **caché inteligente**, **búsqueda full-text ultrarrápida** y **analytics avanzados**. Sube documentos, haz preguntas en alemán, inglés o español y obtén respuestas precisas con el número de página exacto donde se encuentra la información.
 
 ![PDF Query System Demo](https://via.placeholder.com/800x400/667eea/ffffff?text=PDF+Query+System+v2.2)
 
@@ -19,7 +19,13 @@ Sistema inteligente para consultar PDFs con **ubicación de páginas**, **navega
 � **Búsqueda Multi-PDF** - Busca en múltiples documentos simultáneamente  
 �📊 **Análisis Avanzado** - Resúmenes, palabras frecuentes, estadísticas completas  
 
-### 🆕 Nuevas en v2.2.1
+### 🆕 Nuevas en v2.2.2
+🌐 **Traducción Integrada en Frontend** - Selector de idiomas visual con banderas  
+🔄 **Traducir y Buscar** - Un solo click para traducir pregunta y buscar en PDFs  
+📊 **Análisis de Traducción** - Ventana emergente con cobertura y palabras no traducidas  
+📱 **Responsive Design** - Interfaz adaptativa para móviles con traducción  
+
+### 🎯 Nuevas en v2.2.1
 🌐 **Traducción DE↔EN** - Sistema completo con diccionario de 232 palabras  
 🔄 **Query Traducido** - Pregunta en alemán, busca en inglés automáticamente  
 📚 **5 Endpoints Nuevos** - API completa de traducción  
@@ -134,6 +140,8 @@ Abre: **http://localhost:5173**
 | [INDICE.md](INDICE.md) | 📚 Navegación completa de docs |
 | [GUIA_RAPIDA.md](GUIA_RAPIDA.md) | 🚀 Tutorial paso a paso |
 | [docs/CHECKLIST_MEJORAS.md](docs/CHECKLIST_MEJORAS.md) | ✅ Estado de implementación (73% completo) |
+| [docs/TRADUCCION_FRONTEND.md](docs/TRADUCCION_FRONTEND.md) | 🌐 Sistema de traducción en UI |
+| [docs/RESUMEN_TRADUCCION_v2.2.2.md](docs/RESUMEN_TRADUCCION_v2.2.2.md) | 📊 Resumen implementación v2.2.2 |
 | [docs/TRADUCTOR.md](docs/TRADUCTOR.md) | 🌐 Sistema de traducción DE↔EN |
 | [docs/DATABASE.md](docs/DATABASE.md) | 💾 Estructura de base de datos |
 | [docs/CACHE_FTS_ANALYTICS.md](docs/CACHE_FTS_ANALYTICS.md) | ⚡ Cache y FTS |
