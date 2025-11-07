@@ -1327,66 +1327,126 @@ async def add_custom_translation(german: str, english: str):
 
 @app.post("/api/query-translated")
 async def query_pdf_translated(
-    filename: str,
-    question_german: str,
-    translate_result: bool = True,
+    question: str,
+    filenames: List[str] = [],
+    search_all: bool = False,
+    source_lang: str = "de",
+    target_lang: str = "en",
+    translate_result: bool = False,
     db: Session = Depends(get_db)
 ):
     """
-    Hacer query en alemán, traducir al inglés, buscar y opcionalmente traducir resultado
+    Hacer query con traducción automática, soporta búsqueda múltiple
     
     Ejemplo:
     ```
     POST /api/query-translated
     {
-        "filename": "manual.pdf",
-        "question_german": "Wie viele Seiten hat das Dokument?",
-        "translate_result": true
+        "question": "Wie viele Seiten hat das Dokument?",
+        "filenames": ["doc1.pdf", "doc2.pdf"],
+        "search_all": false,
+        "source_lang": "de",
+        "target_lang": "en",
+        "translate_result": false
     }
     ```
     """
     try:
-        # 1. Traducir pregunta de alemán a inglés
-        translation_result = translator.translate_query(question_german, "de", "en")
-        question_english = translation_result["translated"]
+        # 1. Traducir pregunta
+        translation_result = translator.translate_query(question, source_lang, target_lang)
+        question_translated = translation_result["translated"]
         
-        # 2. Hacer query en inglés
-        file_path = UPLOAD_DIR / filename
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"Archivo {filename} no encontrado")
-        
-        # Intenta cache primero
-        cached_result = cache.get_cached_result(db, question_english, [filename], "single")
-        if cached_result:
-            query_result = cached_result
-            query_result["cached"] = True
-        else:
-            # Procesa query
-            start_time = time.time()
-            query_result = generate_answer_with_pages(question_english, file_path, filename)
-            execution_time = time.time() - start_time
+        # 2. Determinar qué PDFs buscar
+        if search_all:
+            # Buscar en todos
+            all_results = db_svc.search_all_pdfs(db, question_translated)
             
-            # Guarda en cache
-            cache.cache_query_result(db, question_english, [filename], "single", 
-                                    query_result, execution_time, ttl_hours=24)
-            query_result["cached"] = False
+            response = {
+                "original_question": question,
+                "translated_question": question_translated,
+                "translation": {
+                    "original": question,
+                    "translated": question_translated,
+                    "coverage": translation_result.get("coverage_percentage", 0)
+                },
+                "answer": all_results.get("answer", ""),
+                "results": all_results.get("results", []),
+                "total_matches": all_results.get("total_matches", 0),
+                "documents_found": all_results.get("documents_found", 0),
+                "keywords": all_results.get("keywords", []),
+                "comparison": all_results.get("comparison", {})
+            }
+            
+        elif len(filenames) > 1:
+            # Búsqueda múltiple
+            multi_results = db_svc.search_multiple_pdfs(db, question_translated, filenames)
+            
+            response = {
+                "original_question": question,
+                "translated_question": question_translated,
+                "translation": {
+                    "original": question,
+                    "translated": question_translated,
+                    "coverage": translation_result.get("coverage_percentage", 0)
+                },
+                "answer": multi_results.get("answer", ""),
+                "results": multi_results.get("results", []),
+                "total_matches": multi_results.get("total_matches", 0),
+                "documents_found": multi_results.get("documents_found", 0),
+                "keywords": multi_results.get("keywords", []),
+                "comparison": multi_results.get("comparison", {})
+            }
+            
+        else:
+            # Búsqueda individual
+            if not filenames or len(filenames) == 0:
+                raise HTTPException(status_code=400, detail="Debe especificar al menos un archivo")
+            
+            filename = filenames[0]
+            file_path = UPLOAD_DIR / filename
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail=f"Archivo {filename} no encontrado")
+            
+            # Intenta cache primero
+            cached_result = cache.get_cached_result(db, question_translated, [filename], "single")
+            if cached_result:
+                query_result = cached_result
+                query_result["cached"] = True
+            else:
+                # Procesa query
+                start_time = time.time()
+                query_result = generate_answer_with_pages(question_translated, file_path, filename)
+                execution_time = time.time() - start_time
+                
+                # Guarda en cache
+                cache.cache_query_result(db, question_translated, [filename], "single", 
+                                        query_result, execution_time, ttl_hours=24)
+                query_result["cached"] = False
+            
+            response = {
+                "original_question": question,
+                "translated_question": question_translated,
+                "translation": {
+                    "original": question,
+                    "translated": question_translated,
+                    "coverage": translation_result.get("coverage_percentage", 0)
+                },
+                "answer": query_result.get("answer", ""),
+                "locations": query_result.get("locations", []),
+                "pages_found": query_result.get("pages_found", []),
+                "total_matches": query_result.get("total_matches", 0),
+                "keywords": query_result.get("keywords", []),
+                "cached": query_result.get("cached", False)
+            }
         
-        # 3. Construir respuesta
-        response = {
-            "original_question": question_german,
-            "translated_question": question_english,
-            "translation_info": translation_result,
-            "query_result": query_result
-        }
-        
-        # 4. Opcionalmente traducir resultado de vuelta a alemán
-        if translate_result and query_result.get("answer"):
-            answer_german = translator.translate_text(
-                query_result["answer"], 
-                source_lang="en", 
-                target_lang="de"
+        # 3. Opcionalmente traducir resultado de vuelta
+        if translate_result and response.get("answer"):
+            answer_translated_back = translator.translate_text(
+                response["answer"], 
+                source_lang=target_lang, 
+                target_lang=source_lang
             )
-            response["answer_german"] = answer_german
+            response["answer_translated_back"] = answer_translated_back
         
         return response
         

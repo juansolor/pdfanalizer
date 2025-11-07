@@ -37,6 +37,13 @@ function App() {
   const [selectedPdfs, setSelectedPdfs] = useState([])
   const [multiResults, setMultiResults] = useState(null)
   const [isMultiSearch, setIsMultiSearch] = useState(false)
+  
+  // Estados para traducción
+  const [translationEnabled, setTranslationEnabled] = useState(false)
+  const [sourceLanguage, setSourceLanguage] = useState('de') // alemán por defecto
+  const [targetLanguage, setTargetLanguage] = useState('en') // inglés por defecto
+  const [translationResult, setTranslationResult] = useState(null)
+  const [showTranslation, setShowTranslation] = useState(false)
 
   useEffect(() => {
     checkApiStatus()
@@ -105,10 +112,90 @@ function App() {
     }
   }
 
+  const handleTranslation = async () => {
+    if (!question) {
+      alert('Por favor escribe un texto para traducir')
+      return
+    }
+
+    try {
+      setLoading(true)
+      setTranslationResult(null)
+      
+      const response = await axios.post(`${API_BASE_URL}/api/translate`, {
+        text: question,
+        source_lang: sourceLanguage,
+        target_lang: targetLanguage
+      })
+      
+      setTranslationResult(response.data)
+      setShowTranslation(true)
+    } catch (error) {
+      console.error('Error translating:', error)
+      alert(`Error al traducir: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleTranslatedQuery = async () => {
+    if (!question) {
+      alert('Por favor escribe una pregunta')
+      return
+    }
+
+    // Usar búsqueda con traducción automática
+    try {
+      setLoading(true)
+      setAnswer('')
+      setQueryStats(null)
+      setMultiResults(null)
+      setIsMultiSearch(searchAll || selectedPdfs.length > 0)
+      
+      const response = await axios.post(`${API_BASE_URL}/api/query-translated`, {
+        question: question,
+        filenames: searchAll ? [] : (selectedPdfs.length > 0 ? selectedPdfs : [currentPdf]),
+        search_all: searchAll,
+        source_lang: sourceLanguage,
+        target_lang: targetLanguage
+      })
+      
+      setAnswer(response.data.answer)
+      if (response.data.results) {
+        setMultiResults(response.data.results)
+      }
+      if (response.data.locations) {
+        setLocations(response.data.locations)
+      }
+      if (response.data.pages_found) {
+        setPagesFound(response.data.pages_found)
+      }
+      setQueryStats({
+        matches: response.data.total_matches || 0,
+        keywords: response.data.keywords || [],
+        documents_found: response.data.documents_found || 0,
+        comparison: response.data.comparison || {},
+        translation: response.data.translation || null
+      })
+    } catch (error) {
+      console.error('Error with translated query:', error)
+      const errorMsg = error.response?.data?.detail || error.message
+      setAnswer(`❌ Error: ${errorMsg}`)
+      alert(`Error al procesar consulta traducida: ${errorMsg}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleQuery = async () => {
     if (!question) {
       alert('Por favor escribe una pregunta')
       return
+    }
+
+    // Si la traducción está habilitada, usar query traducido
+    if (translationEnabled) {
+      return handleTranslatedQuery()
     }
 
     // Búsqueda múltiple
@@ -267,6 +354,64 @@ function App() {
         <section className="query-section card">
           <h2>🤖 Consultar PDF</h2>
           
+          {/* Sección de Traducción */}
+          <div className="translation-section">
+            <label className="checkbox-label translation-toggle">
+              <input
+                type="checkbox"
+                checked={translationEnabled}
+                onChange={(e) => setTranslationEnabled(e.target.checked)}
+                disabled={loading}
+              />
+              <span>🌐 Habilitar Traducción Automática</span>
+            </label>
+            
+            {translationEnabled && (
+              <div className="language-selectors">
+                <div className="language-selector">
+                  <label htmlFor="source-lang">Idioma Origen:</label>
+                  <select
+                    id="source-lang"
+                    value={sourceLanguage}
+                    onChange={(e) => setSourceLanguage(e.target.value)}
+                    className="select-input"
+                    disabled={loading}
+                  >
+                    <option value="de">🇩🇪 Alemán (Deutsch)</option>
+                    <option value="en">🇬🇧 Inglés (English)</option>
+                    <option value="es">🇪🇸 Español</option>
+                  </select>
+                </div>
+                
+                <div className="language-arrow">→</div>
+                
+                <div className="language-selector">
+                  <label htmlFor="target-lang">Idioma Destino:</label>
+                  <select
+                    id="target-lang"
+                    value={targetLanguage}
+                    onChange={(e) => setTargetLanguage(e.target.value)}
+                    className="select-input"
+                    disabled={loading}
+                  >
+                    <option value="en">🇬🇧 Inglés (English)</option>
+                    <option value="de">🇩🇪 Alemán (Deutsch)</option>
+                    <option value="es">🇪🇸 Español</option>
+                  </select>
+                </div>
+                
+                <button
+                  onClick={handleTranslation}
+                  disabled={!question || loading}
+                  className="btn btn-translate"
+                  title="Traducir texto sin buscar"
+                >
+                  🔄 Solo Traducir
+                </button>
+              </div>
+            )}
+          </div>
+          
           {/* Opción de búsqueda múltiple */}
           <div className="multi-search-toggle">
             <label className="checkbox-label">
@@ -330,12 +475,20 @@ function App() {
           )}
 
           <div className="question-container">
-            <label htmlFor="question-input">Tu pregunta:</label>
+            <label htmlFor="question-input">
+              {translationEnabled ? `Tu pregunta (en ${sourceLanguage === 'de' ? 'Alemán' : sourceLanguage === 'en' ? 'Inglés' : 'Español'}):` : 'Tu pregunta:'}
+            </label>
             <textarea
               id="question-input"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder={searchAll ? "Escribe tu pregunta para buscar en todos los PDFs..." : "Escribe tu pregunta sobre el PDF..."}
+              placeholder={
+                translationEnabled 
+                  ? `Escribe en ${sourceLanguage === 'de' ? 'alemán' : sourceLanguage === 'en' ? 'inglés' : 'español'} y se traducirá automáticamente...`
+                  : searchAll 
+                    ? "Escribe tu pregunta para buscar en todos los PDFs..." 
+                    : "Escribe tu pregunta sobre el PDF..."
+              }
               disabled={loading}
               rows="3"
               className="textarea-input"
@@ -345,9 +498,54 @@ function App() {
               disabled={!question || (!currentPdf && !searchAll && selectedPdfs.length === 0) || loading}
               className="btn btn-secondary"
             >
-              {loading ? '⏳ Procesando...' : '🔍 Hacer Pregunta'}
+              {loading ? '⏳ Procesando...' : translationEnabled ? '🌐 Traducir y Buscar' : '🔍 Hacer Pregunta'}
             </button>
           </div>
+          
+          {/* Resultados de traducción */}
+          {showTranslation && translationResult && (
+            <div className="translation-result-container">
+              <div className="translation-header">
+                <h4>🌐 Resultado de Traducción</h4>
+                <button 
+                  onClick={() => setShowTranslation(false)}
+                  className="close-btn"
+                >
+                  ✕
+                </button>
+              </div>
+              
+              <div className="translation-content">
+                <div className="translation-box">
+                  <div className="translation-label">
+                    {sourceLanguage === 'de' ? '🇩🇪 Alemán' : sourceLanguage === 'en' ? '🇬🇧 Inglés' : '🇪🇸 Español'}:
+                  </div>
+                  <p className="translation-text original">{translationResult.original_text}</p>
+                </div>
+                
+                <div className="translation-arrow">→</div>
+                
+                <div className="translation-box">
+                  <div className="translation-label">
+                    {targetLanguage === 'de' ? '🇩🇪 Alemán' : targetLanguage === 'en' ? '🇬🇧 Inglés' : '🇪🇸 Español'}:
+                  </div>
+                  <p className="translation-text translated">{translationResult.translated_text}</p>
+                </div>
+              </div>
+              
+              {translationResult.analysis && (
+                <div className="translation-analysis">
+                  <p><strong>📊 Análisis:</strong></p>
+                  <p>✓ Palabras traducidas: {translationResult.analysis.words_translated}</p>
+                  <p>✓ Palabras totales: {translationResult.analysis.total_words}</p>
+                  <p>✓ Cobertura: {translationResult.analysis.coverage_percentage}%</p>
+                  {translationResult.analysis.untranslated_words && translationResult.analysis.untranslated_words.length > 0 && (
+                    <p>⚠️ Sin traducir: {translationResult.analysis.untranslated_words.join(', ')}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {answer && (
             <div className="answer-container">
@@ -496,6 +694,14 @@ function App() {
                   )}
                   {queryStats.keywords && queryStats.keywords.length > 0 && (
                     <p>🔍 Palabras clave buscadas: {queryStats.keywords.join(', ')}</p>
+                  )}
+                  {queryStats.translation && (
+                    <div className="translation-info">
+                      <p><strong>🌐 Traducción aplicada:</strong></p>
+                      <p>Original: "{queryStats.translation.original}"</p>
+                      <p>Traducido: "{queryStats.translation.translated}"</p>
+                      <p>Cobertura: {queryStats.translation.coverage}%</p>
+                    </div>
                   )}
                 </div>
               )}
