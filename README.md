@@ -1,4 +1,4 @@
-# 📚 PDF Query System v2.2.2
+# 📚 PDF Query System v2.3.0
 
 [![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
@@ -19,7 +19,14 @@ Sistema inteligente para consultar PDFs con **ubicación de páginas**, **navega
 � **Búsqueda Multi-PDF** - Busca en múltiples documentos simultáneamente  
 �📊 **Análisis Avanzado** - Resúmenes, palabras frecuentes, estadísticas completas  
 
-### 🆕 Nuevas en v2.2.2
+### 🆕 Nuevas en v2.3.0
+📄 **Traducción Completa de PDFs** - Traduce PDFs completos de alemán a inglés (y viceversa)  
+💾 **Descarga de Traducción** - Descarga el PDF traducido como archivo TXT  
+📈 **Estadísticas de Traducción** - Cobertura, páginas, palabras traducidas  
+⚠️ **Alerta de Cobertura** - Identifica páginas con baja cobertura (<70%)  
+📚 **Historial de Traducidos** - Lista de todos los PDFs traducidos con descarga directa  
+
+### 🎯 En v2.2.2
 🌐 **Traducción Integrada en Frontend** - Selector de idiomas visual con banderas  
 🔄 **Traducir y Buscar** - Un solo click para traducir pregunta y buscar en PDFs  
 📊 **Análisis de Traducción** - Ventana emergente con cobertura y palabras no traducidas  

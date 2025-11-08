@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Any
 from collections import Counter
 from dotenv import load_dotenv
 import time
+from datetime import datetime
 
 # Importar base de datos
 from database import get_db, init_db
@@ -22,6 +23,9 @@ import db_services as db_svc
 import cache_manager as cache
 import fts_search as fts
 import analytics as analytics_module
+
+# Importar traductor con IA
+import ai_translator
 
 # Importar traductor
 import translator
@@ -1237,6 +1241,15 @@ class TranslateRequest(BaseModel):
     target_lang: str = "en"  # inglés por defecto
     preserve_case: bool = True
 
+class TranslatePdfRequest(BaseModel):
+    filename: str
+    source_lang: str = "de"  # alemán por defecto
+    target_lang: str = "en"  # inglés por defecto
+    pages: Optional[List[int]] = None
+    save_translated: bool = True
+    output_format: str = "txt"  # "txt", "pdf", o "docx"
+    use_ai: bool = True  # Usar IA si está disponible
+
 @app.post("/api/translate")
 async def translate_text_endpoint(request: TranslateRequest):
     """
@@ -1454,6 +1467,310 @@ async def query_pdf_translated(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en query traducida: {str(e)}")
+
+
+@app.post("/api/translate-pdf")
+async def translate_pdf_content(request: TranslatePdfRequest):
+    """
+    Traducir el contenido completo de un PDF (o páginas específicas)
+    
+    Ejemplo:
+    ```
+    POST /api/translate-pdf
+    {
+        "filename": "manual.pdf",
+        "source_lang": "de",
+        "target_lang": "en",
+        "pages": [1, 2, 3],  // opcional, si no se especifica traduce todo
+        "save_translated": true  // guardar PDF traducido
+    }
+    ```
+    
+    Retorna:
+    - pages_translated: número de páginas traducidas
+    - statistics: estadísticas de traducción
+    - translated_file: nombre del archivo traducido (si save_translated=true)
+    """
+    try:
+        file_path = UPLOAD_DIR / request.filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"Archivo {request.filename} no encontrado")
+        
+        # Extraer texto del PDF por páginas
+        pdf_text_by_pages = extract_pdf_text_by_pages(file_path)
+        
+        if not pdf_text_by_pages:
+            raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF")
+        
+        # Determinar qué páginas traducir
+        pages_to_translate = request.pages if request.pages else list(pdf_text_by_pages.keys())
+        
+        # Traducir cada página
+        original_pages = {}
+        translated_pages = {}
+        translation_stats = {
+            "total_pages": len(pages_to_translate),
+            "total_words_original": 0,
+            "total_words_translated": 0,
+            "average_coverage": 0,
+            "pages_with_low_coverage": []
+        }
+        
+        coverage_sum = 0
+        
+        for page_num in pages_to_translate:
+            if page_num not in pdf_text_by_pages:
+                continue
+            
+            original_text = pdf_text_by_pages[page_num]
+            original_pages[page_num] = original_text
+            
+            # Mejorar traducción dividiendo en párrafos para mejor contexto
+            if not original_text.strip():
+                translated_pages[page_num] = original_text
+                continue
+                
+            paragraphs = original_text.split('\n\n')
+            translated_paragraphs = []
+            page_coverage_sum = 0
+            page_word_count_original = 0
+            page_word_count_translated = 0
+            
+            for paragraph in paragraphs:
+                if not paragraph.strip():
+                    translated_paragraphs.append(paragraph)
+                    continue
+                
+                # Traducir párrafo con IA o diccionario local
+                if request.use_ai:
+                    try:
+                        translation_result = await ai_translator.translate_with_ai(paragraph.strip(), request.source_lang, request.target_lang)
+                    except Exception as e:
+                        # Fallback al diccionario local si falla la IA
+                        translation_result = translator.translate_query(paragraph.strip(), request.source_lang, request.target_lang)
+                else:
+                    translation_result = translator.translate_query(paragraph.strip(), request.source_lang, request.target_lang)
+                    
+                translated_paragraph = translation_result["translated"]
+                translated_paragraphs.append(translated_paragraph)
+                
+                # Acumular estadísticas del párrafo
+                para_words_orig = len(paragraph.split())
+                para_words_trans = len(translated_paragraph.split())
+                para_coverage = translation_result.get("coverage_percentage", 0)
+                
+                page_word_count_original += para_words_orig
+                page_word_count_translated += para_words_trans
+                page_coverage_sum += para_coverage * para_words_orig  # Peso por palabras
+            
+            # Unir párrafos traducidos
+            translated_text = '\n\n'.join(translated_paragraphs)
+            translated_pages[page_num] = translated_text
+            
+            # Calcular cobertura promedio de la página (ponderada por palabras)
+            page_coverage = page_coverage_sum / page_word_count_original if page_word_count_original > 0 else 0
+            
+            # Estadísticas globales
+            translation_stats["total_words_original"] += page_word_count_original
+            translation_stats["total_words_translated"] += page_word_count_translated
+            coverage_sum += page_coverage
+            
+            if page_coverage < 70:
+                translation_stats["pages_with_low_coverage"].append({
+                    "page": page_num,
+                    "coverage": round(page_coverage, 2)
+                })
+        
+        # Calcular promedio de cobertura
+        if len(pages_to_translate) > 0:
+            translation_stats["average_coverage"] = round(coverage_sum / len(pages_to_translate), 2)
+        
+        # Guardar archivo traducido si se solicita
+        translated_filename = None
+        if request.save_translated:
+            # Crear nombre de archivo traducido
+            base_name = request.filename.rsplit('.', 1)[0]
+            if request.output_format == "docx":
+                file_extension = "docx"
+            elif request.output_format == "pdf":
+                file_extension = "pdf"
+            else:
+                file_extension = "txt"
+                
+            translated_filename = f"{base_name}_{request.source_lang}_to_{request.target_lang}.{file_extension}"
+            translated_path = RESULTS_DIR / translated_filename
+            
+            if request.output_format == "docx":
+                # Crear documento Word
+                try:
+                    from docx import Document
+                    from docx.shared import Inches
+                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                    
+                    doc = Document()
+                    
+                    # Agregar título principal
+                    title = doc.add_heading(f"PDF Traducido: {request.filename}", 0)
+                    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    
+                    # Agregar metadata
+                    doc.add_paragraph(f"Idioma: {request.source_lang.upper()} → {request.target_lang.upper()}")
+                    doc.add_paragraph(f"Páginas: {len(translated_pages)}")
+                    doc.add_paragraph(f"Cobertura promedio: {translation_stats['average_coverage']}%")
+                    doc.add_paragraph(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    doc.add_paragraph()
+                    
+                    # Agregar contenido por páginas
+                    for page_num in sorted(translated_pages.keys()):
+                        # Título de página
+                        page_title = doc.add_heading(f"Página {page_num}", level=1)
+                        
+                        # Contenido de la página
+                        paragraphs = translated_pages[page_num].split('\n\n')
+                        for paragraph_text in paragraphs:
+                            if paragraph_text.strip():
+                                doc.add_paragraph(paragraph_text.strip())
+                        
+                        # Espacio entre páginas
+                        doc.add_page_break()
+                    
+                    doc.save(str(translated_path))
+                    
+                except ImportError:
+                    # Si python-docx no está instalado, usar formato TXT
+                    translated_filename = f"{base_name}_{request.source_lang}_to_{request.target_lang}.txt"
+                    translated_path = RESULTS_DIR / translated_filename
+                    request.output_format = "txt"
+                    
+            elif request.output_format == "pdf":
+                # Crear PDF traducido manteniendo estructura
+                try:
+                    from reportlab.lib.pagesizes import A4
+                    from reportlab.pdfgen import canvas
+                    from reportlab.lib.styles import getSampleStyleSheet
+                    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+                    from reportlab.lib.units import inch
+                    
+                    doc = SimpleDocTemplate(str(translated_path), pagesize=A4)
+                    styles = getSampleStyleSheet()
+                    story = []
+                    
+                    for page_num in sorted(translated_pages.keys()):
+                        # Agregar título de página
+                        title = Paragraph(f"<b>Página {page_num}</b>", styles['Heading2'])
+                        story.append(title)
+                        story.append(Spacer(1, 0.2*inch))
+                        
+                        # Agregar contenido traducido
+                        text = translated_pages[page_num].replace('\n', '<br/>')
+                        content = Paragraph(text, styles['Normal'])
+                        story.append(content)
+                        story.append(Spacer(1, 0.3*inch))
+                    
+                    doc.build(story)
+                except ImportError:
+                    # Si reportlab no está instalado, usar formato TXT
+                    translated_filename = f"{base_name}_{request.source_lang}_to_{request.target_lang}.txt"
+                    translated_path = RESULTS_DIR / translated_filename
+                    request.output_format = "txt"
+            
+            if request.output_format == "txt":
+                # Guardar como TXT mejorado
+                with open(translated_path, 'w', encoding='utf-8') as f:
+                    f.write(f"# PDF TRADUCIDO: {request.filename}\n")
+                    f.write(f"# Idioma: {request.source_lang.upper()} → {request.target_lang.upper()}\n")
+                    f.write(f"# Páginas: {len(translated_pages)}\n")
+                    f.write(f"# Cobertura promedio: {translation_stats['average_coverage']}%\n")
+                    f.write(f"# Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"\n{'='*80}\n\n")
+                    
+                    for page_num in sorted(translated_pages.keys()):
+                        f.write(f"{'='*60}\n")
+                        f.write(f"PÁGINA {page_num}\n")
+                        f.write(f"{'='*60}\n\n")
+                        f.write(translated_pages[page_num])
+                        f.write(f"\n\n{'='*60}\n\n")
+        
+        return {
+            "filename": request.filename,
+            "source_lang": request.source_lang,
+            "target_lang": request.target_lang,
+            "pages_translated": len(translated_pages),
+            "statistics": translation_stats,
+            "translated_file": translated_filename if request.save_translated else None,
+            "download_url": f"/api/download-translated/{translated_filename}" if translated_filename else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al traducir PDF: {str(e)}")
+
+
+@app.get("/api/ai-info")
+async def get_ai_translation_info():
+    """
+    Obtener información sobre disponibilidad de IA para traducción
+    """
+    try:
+        info = ai_translator.get_ai_info()
+        return {
+            "ai_available": info["method"] in ["gemini", "openai"],
+            "method": info["method"],
+            "gemini_available": info["gemini_available"],
+            "openai_available": info["openai_available"],
+            "local_fallback": info["local_fallback"]
+        }
+    except Exception as e:
+        return {
+            "ai_available": False,
+            "method": "local",
+            "error": str(e)
+        }
+
+
+@app.get("/api/download-translated/{filename}")
+async def download_translated_file(filename: str):
+    """
+    Descargar archivo traducido
+    """
+    file_path = RESULTS_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"Archivo traducido {filename} no encontrado")
+    
+    return FileResponse(
+        file_path,
+        media_type="text/plain",
+        filename=filename,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.get("/api/translated-files")
+async def list_translated_files():
+    """
+    Listar todos los archivos traducidos disponibles
+    """
+    try:
+        if not RESULTS_DIR.exists():
+            return {"translated_files": []}
+        
+        translated_files = [
+            {
+                "filename": f.name,
+                "size": f.stat().st_size,
+                "created": f.stat().st_mtime,
+                "download_url": f"/api/download-translated/{f.name}"
+            }
+            for f in RESULTS_DIR.glob("*_to_*.txt")
+        ]
+        
+        return {
+            "count": len(translated_files),
+            "translated_files": translated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar archivos: {str(e)}")
 
 
 # Catch-all para peticiones de hot-reload de React (evitar spam de 404)

@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import './App.css'
 
+// Configurar timeouts por defecto para axios
+axios.defaults.timeout = 30000  // 30 segundos por defecto
+
 // Configuración dinámica de API
 // Detecta automáticamente si estás accediendo desde otra máquina en la red
 const getApiBaseUrl = () => {
@@ -44,17 +47,29 @@ function App() {
   const [targetLanguage, setTargetLanguage] = useState('en') // inglés por defecto
   const [translationResult, setTranslationResult] = useState(null)
   const [showTranslation, setShowTranslation] = useState(false)
+  
+  // Estados para traducción de PDFs completos
+  const [pdfTranslating, setPdfTranslating] = useState(false)
+  const [pdfTranslationResult, setPdfTranslationResult] = useState(null)
+  const [outputFormat, setOutputFormat] = useState('docx') // 'docx', 'pdf' o 'txt'
+  const [showPdfTranslation, setShowPdfTranslation] = useState(false)
+  const [selectedPdfForTranslation, setSelectedPdfForTranslation] = useState('')
+  const [translatedFiles, setTranslatedFiles] = useState([])
+  const [useAI, setUseAI] = useState(true) // Usar IA por defecto
+  const [aiInfo, setAiInfo] = useState(null) // Info sobre disponibilidad de IA
 
   useEffect(() => {
     checkApiStatus()
     loadPdfList()
+    loadTranslatedFiles()
+    loadAiInfo()
   }, [])
 
   const checkApiStatus = async () => {
     try {
       console.log('Intentando conectar con:', API_BASE_URL)
       const response = await axios.get(`${API_BASE_URL}/`, {
-        timeout: 5000
+        timeout: 15000  // Aumentar timeout a 15 segundos
       })
       console.log('Respuesta del backend:', response.data)
       setApiStatus('connected')
@@ -77,6 +92,73 @@ function App() {
     } catch (error) {
       console.error('Error loading PDF list:', error)
     }
+  }
+
+  const loadTranslatedFiles = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/translated-files`)
+      setTranslatedFiles(response.data.translated_files || [])
+    } catch (error) {
+      console.error('Error loading translated files:', error)
+    }
+  }
+
+  const loadAiInfo = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/ai-info`)
+      setAiInfo(response.data)
+      
+      // Si no hay IA disponible, desactivar por defecto
+      if (!response.data.ai_available) {
+        setUseAI(false)
+      }
+    } catch (error) {
+      console.error('Error loading AI info:', error)
+      setUseAI(false) // Desactivar IA si hay error
+    }
+  }
+
+  const handleTranslatePdf = async () => {
+    const pdfToTranslate = selectedPdfForTranslation || currentPdf
+    
+    if (!pdfToTranslate) {
+      alert('Por favor selecciona un PDF para traducir')
+      return
+    }
+
+    try {
+      setPdfTranslating(true)
+      setPdfTranslationResult(null)
+      
+      const response = await axios.post(`${API_BASE_URL}/api/translate-pdf`, {
+        filename: pdfToTranslate,
+        source_lang: sourceLanguage,
+        target_lang: targetLanguage,
+        save_translated: true,
+        output_format: outputFormat,
+        use_ai: useAI
+      }, {
+        timeout: 300000  // 5 minutos para traducción con IA
+      })
+      
+      setPdfTranslationResult(response.data)
+      setShowPdfTranslation(true)
+      
+      // Recargar lista de archivos traducidos
+      loadTranslatedFiles()
+      
+      alert(`✅ PDF traducido exitosamente!\n${response.data.pages_translated} páginas traducidas\nCobertura promedio: ${response.data.statistics.average_coverage}%`)
+    } catch (error) {
+      console.error('Error translating PDF:', error)
+      alert(`Error al traducir PDF: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setPdfTranslating(false)
+    }
+  }
+
+  const downloadTranslatedFile = (filename) => {
+    const downloadUrl = `${API_BASE_URL}/api/download-translated/${filename}`
+    window.open(downloadUrl, '_blank')
   }
 
   const handleFileChange = (event) => {
@@ -741,6 +823,182 @@ function App() {
                 🚀 Análisis Completo
               </button>
             </div>
+          </div>
+          
+          {/* Sección de Traducción de PDF Completo */}
+          <div className="pdf-translation-section">
+            <h3>📄 Traducir PDF Completo</h3>
+            <div className="pdf-translation-controls">
+              <div className="pdf-translation-selector">
+                <label htmlFor="pdf-translate-select">Seleccionar PDF para traducir:</label>
+                <select 
+                  id="pdf-translate-select"
+                  value={selectedPdfForTranslation || currentPdf}
+                  onChange={(e) => setSelectedPdfForTranslation(e.target.value)}
+                  disabled={pdfTranslating}
+                  className="select-input"
+                >
+                  <option value="">-- Selecciona un PDF --</option>
+                  {pdfList.map((pdf, index) => (
+                    <option key={index} value={pdf}>{pdf}</option>
+                  ))}
+                </select>
+              </div>
+              
+              <div className="translation-language-row">
+                <div className="language-mini-selector">
+                  <label>De:</label>
+                  <select
+                    value={sourceLanguage}
+                    onChange={(e) => setSourceLanguage(e.target.value)}
+                    className="select-input-mini"
+                    disabled={pdfTranslating}
+                  >
+                    <option value="de">🇩🇪 DE</option>
+                    <option value="en">🇬🇧 EN</option>
+                    <option value="es">🇪🇸 ES</option>
+                  </select>
+                </div>
+                
+                <span className="arrow-mini">→</span>
+                
+                <div className="language-mini-selector">
+                  <label>A:</label>
+                  <select
+                    value={targetLanguage}
+                    onChange={(e) => setTargetLanguage(e.target.value)}
+                    className="select-input-mini"
+                    disabled={pdfTranslating}
+                  >
+                    <option value="en">🇬🇧 EN</option>
+                    <option value="de">🇩🇪 DE</option>
+                    <option value="es">🇪🇸 ES</option>
+                  </select>
+                </div>
+                
+                <div className="format-mini-selector">
+                  <label>Formato:</label>
+                  <select
+                    value={outputFormat}
+                    onChange={(e) => setOutputFormat(e.target.value)}
+                    className="select-input-mini"
+                    disabled={pdfTranslating}
+                  >
+                    <option value="docx">📄 Word</option>
+                    <option value="pdf">📄 PDF</option>
+                    <option value="txt">📝 TXT</option>
+                  </select>
+                </div>
+                
+                <div className="ai-selector">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={useAI}
+                      onChange={(e) => setUseAI(e.target.checked)}
+                      disabled={pdfTranslating || !aiInfo?.ai_available}
+                    />
+                    {aiInfo?.ai_available ? '🤖 IA' : '📖 Local'}
+                  </label>
+                  {aiInfo?.method && aiInfo.ai_available && (
+                    <span className="ai-method">
+                      {aiInfo.method === 'gemini' ? '🟢 Gemini' : aiInfo.method === 'openai' ? '🟢 GPT' : '🔴 Local'}
+                    </span>
+                  )}
+                </div>
+                
+                <button
+                  onClick={handleTranslatePdf}
+                  disabled={!selectedPdfForTranslation && !currentPdf || pdfTranslating}
+                  className="btn btn-translate-pdf"
+                >
+                  {pdfTranslating ? (
+                    useAI ? '🤖 Traduciendo con IA...' : '📖 Traduciendo local...'
+                  ) : '🌐 Traducir PDF Completo'}
+                </button>
+              </div>
+            </div>
+            
+            {/* Resultados de traducción de PDF */}
+            {showPdfTranslation && pdfTranslationResult && (
+              <div className="pdf-translation-results">
+                <div className="pdf-translation-header">
+                  <h4>✅ PDF Traducido: {pdfTranslationResult.filename}</h4>
+                  <button 
+                    onClick={() => setShowPdfTranslation(false)}
+                    className="close-btn"
+                  >
+                    ✕
+                  </button>
+                </div>
+                
+                <div className="pdf-translation-stats">
+                  <div className="stat-box">
+                    <span className="stat-label">Páginas Traducidas</span>
+                    <span className="stat-value">{pdfTranslationResult.pages_translated}</span>
+                  </div>
+                  <div className="stat-box">
+                    <span className="stat-label">Cobertura Promedio</span>
+                    <span className="stat-value">{pdfTranslationResult.statistics.average_coverage}%</span>
+                  </div>
+                  <div className="stat-box">
+                    <span className="stat-label">Palabras Traducidas</span>
+                    <span className="stat-value">{pdfTranslationResult.statistics.total_words_translated}</span>
+                  </div>
+                </div>
+                
+                {pdfTranslationResult.translated_file && (
+                  <div className="download-section">
+                    <button
+                      onClick={() => downloadTranslatedFile(pdfTranslationResult.translated_file)}
+                      className="btn btn-download"
+                    >
+                      📥 Descargar Archivo Traducido
+                    </button>
+                    <p className="download-info">
+                      Archivo: {pdfTranslationResult.translated_file}
+                    </p>
+                  </div>
+                )}
+                
+                {pdfTranslationResult.statistics.pages_with_low_coverage.length > 0 && (
+                  <div className="low-coverage-warning">
+                    <p><strong>⚠️ Páginas con cobertura baja (&lt;70%):</strong></p>
+                    <ul>
+                      {pdfTranslationResult.statistics.pages_with_low_coverage.map((item, idx) => (
+                        <li key={idx}>
+                          Página {item.page}: {item.coverage}% de cobertura
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Lista de archivos traducidos */}
+            {translatedFiles.length > 0 && (
+              <div className="translated-files-list">
+                <h4>📚 Archivos Traducidos Disponibles</h4>
+                <div className="translated-files-grid">
+                  {translatedFiles.map((file, index) => (
+                    <div key={index} className="translated-file-item">
+                      <div className="file-info">
+                        <span className="file-icon">📄</span>
+                        <span className="file-name">{file.filename}</span>
+                      </div>
+                      <button
+                        onClick={() => downloadTranslatedFile(file.filename)}
+                        className="btn-download-mini"
+                        title="Descargar archivo traducido"
+                      >
+                        📥
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Resultados del análisis */}
