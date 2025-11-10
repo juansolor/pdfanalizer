@@ -242,22 +242,25 @@ function App() {
         target_lang: targetLanguage
       })
       
-      setAnswer(response.data.answer)
-      if (response.data.results) {
-        setMultiResults(response.data.results)
+      // Manejar respuesta directa o desde cache
+      const data = response.data.result || response.data
+      
+      setAnswer(data.answer)
+      if (data.results) {
+        setMultiResults(data.results)
       }
-      if (response.data.locations) {
-        setLocations(response.data.locations)
+      if (data.locations) {
+        setLocations(data.locations)
       }
-      if (response.data.pages_found) {
-        setPagesFound(response.data.pages_found)
+      if (data.pages_found) {
+        setPagesFound(data.pages_found)
       }
       setQueryStats({
-        matches: response.data.total_matches || 0,
-        keywords: response.data.keywords || [],
-        documents_found: response.data.documents_found || 0,
-        comparison: response.data.comparison || {},
-        translation: response.data.translation || null
+        matches: data.total_matches || 0,
+        keywords: data.keywords || [],
+        documents_found: data.documents_found || 0,
+        comparison: data.comparison || {},
+        translation: data.translation || null
       })
     } catch (error) {
       console.error('Error with translated query:', error)
@@ -295,13 +298,16 @@ function App() {
           search_all: searchAll
         })
         
-        setAnswer(response.data.answer)
-        setMultiResults(response.data.results || [])
+        // Manejar respuesta directa o desde cache
+        const data = response.data.result || response.data
+        
+        setAnswer(data.answer)
+        setMultiResults(data.results || [])
         setQueryStats({
-          matches: response.data.total_matches || 0,
-          keywords: response.data.keywords || [],
-          documents_found: response.data.documents_found || 0,
-          comparison: response.data.comparison || {}
+          matches: data.total_matches || 0,
+          keywords: data.keywords || [],
+          documents_found: data.documents_found || 0,
+          comparison: data.comparison || {}
         })
       } catch (error) {
         console.error('Error querying multiple PDFs:', error)
@@ -333,12 +339,15 @@ function App() {
         filename: currentPdf
       })
       
-      setAnswer(response.data.answer)
-      setLocations(response.data.locations || [])
-      setPagesFound(response.data.pages_found || [])
+      // Manejar respuesta directa o desde cache
+      const data = response.data.result || response.data
+      
+      setAnswer(data.answer)
+      setLocations(data.locations || [])
+      setPagesFound(data.pages_found || [])
       setQueryStats({
-        matches: response.data.total_matches || 0,
-        keywords: response.data.keywords || []
+        matches: data.total_matches || 0,
+        keywords: data.keywords || []
       })
     } catch (error) {
       console.error('Error querying PDF:', error)

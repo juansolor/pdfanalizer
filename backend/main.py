@@ -44,7 +44,7 @@ DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 RELOAD = os.getenv("RELOAD", "True").lower() == "true"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "50")) * 1024 * 1024  # MB a bytes
-UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "pdfs")
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "../pdfs")
 RESULTS_FOLDER = os.getenv("RESULTS_FOLDER", "results")
 
 app = FastAPI(
